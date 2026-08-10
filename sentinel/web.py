@@ -117,7 +117,7 @@ def dashboard():
                 request.form.get('password', '').encode()).hexdigest()
             if email == c['web_email'] and pw_hash == c['web_password_sha256']:
                 payload = f'{email};{time.time() + 365 * 86400}'
-                resp = make_response(redirect('/'))
+                resp = make_response(redirect(request.url))
                 resp.set_cookie('sentinel_auth',
                                 payload + '|' + _sign(payload, c['web_secret']),
                                 max_age=365 * 86400, httponly=True,
