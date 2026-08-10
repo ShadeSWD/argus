@@ -1,0 +1,23 @@
+{
+  "http_checks": ["https://example.org/"],
+  "watch_containers": ["web", "db"],
+  "log_since": "10m",
+  "slow_ms": 8000,
+  "disk_pct_max": 90,
+  "mem_available_pct_min": 5,
+  "load_per_core_max": 4,
+  "log_errors_min": 5,
+  "ollama_url": "http://127.0.0.1:11434",
+  "ollama_model": "qwen2.5:3b",
+  "llm_timeout": 180,
+  "auto_remediate": true,
+  "dry_run": false,
+  "action_cooldown_s": 1800,
+  "action_daily_max": 3,
+  "actions": {"restart:web": {"cmd": ["docker", "restart", "web"]}},
+  "data_dir": "/var/lib/aiops-sentinel",
+  "notify_cmd": ["/usr/bin/python3", "/path/to/your/notify.py"],
+  "web_email": "you@example.org",
+  "web_password_sha256": "<sha256 пароля>",
+  "web_secret": "<случайные 64 hex-символа>"
+}
