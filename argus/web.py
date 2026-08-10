@@ -29,6 +29,32 @@ def _sign(value, secret):
     return hmac.new(secret.encode(), value.encode(), hashlib.sha256).hexdigest()
 
 
+OWNER_IPS_PATH = '/var/lib/argus/owner_ips.json'
+_owner_seen = {}
+
+
+def _remember_owner(req):
+    """IP авторизованного захода → «свои» устройства для веб-аналитики."""
+    ip = req.headers.get('X-Real-IP') or req.remote_addr
+    if not ip or ip == '127.0.0.1':
+        return
+    now = time.time()
+    if now - _owner_seen.get(ip, 0) < 3600:
+        return
+    _owner_seen[ip] = now
+    try:
+        try:
+            with open(OWNER_IPS_PATH, encoding='utf-8') as fh:
+                ips = json.load(fh)
+        except (OSError, ValueError):
+            ips = {}
+        ips[ip] = int(now)
+        with open(OWNER_IPS_PATH, 'w', encoding='utf-8') as fh:
+            json.dump(ips, fh)
+    except OSError:
+        pass
+
+
 def _auth_ok(req):
     c = cfg()
     token = (req.cookies.get('argus_auth')
@@ -40,9 +66,12 @@ def _auth_ok(req):
         return False
     try:
         email, exp = payload.rsplit(':', 1)
-        return email == c['web_email'] and float(exp) > time.time()
+        ok = email == c['web_email'] and float(exp) > time.time()
     except ValueError:
         return False
+    if ok:
+        _remember_owner(req)
+    return ok
 
 
 LOGIN_HTML = """<!doctype html><html lang="ru"><head><meta charset="utf-8">
@@ -64,7 +93,6 @@ background:#38bdf8;color:#0f172a;font-weight:600;cursor:pointer}
 
 DASH_HTML = """<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="60">
 <title>Argus — мониторинг сервера</title><style>
 body{font-family:system-ui;margin:0;background:#0f172a;color:#e2e8f0}
 header{padding:1rem 1.5rem;background:#1e293b;display:flex;justify-content:space-between}
@@ -74,20 +102,30 @@ main{padding:1rem 1.5rem;max-width:1100px;margin:0 auto}
 .ok{color:#4ade80}.bad{color:#f87171}.warn{color:#fbbf24}
 table{width:100%;border-collapse:collapse;font-size:.9rem}
 td,th{padding:.35rem .5rem;border-bottom:1px solid #334155;text-align:left}
-small{color:#94a3b8}h4{margin:.2rem 0 .6rem}</style></head><body>
+small{color:#94a3b8}h4{margin:.2rem 0 .6rem}
+.glbl{display:block;margin:14px 0 6px;color:#64748b;font-size:.78rem;
+text-transform:uppercase;letter-spacing:.06em}
+.glbl:first-child{margin-top:0}</style></head><body>
 <header><b>🛰 Argus · мониторинг сервера</b>
 <small>снимок: {{ snap.ts }} · автообновление 60 с ·
 инцидентов открыто: {{ open_count }}</small></header><main>
+<span class="glbl">Ресурсы</span>
 <div class="grid">
 <div class="card"><h4>Ресурсы</h4>
 Диск: <b class="{{ 'bad' if snap.resources.disk_used_pct >= 90 else 'ok' }}">{{ snap.resources.disk_used_pct }}%</b><br>
 Память свободна: <b class="{{ 'warn' if snap.resources.mem_available_pct <= 10 else 'ok' }}">{{ snap.resources.mem_available_pct }}%</b><br>
 Загрузка/ядро: <b class="{{ 'warn' if snap.resources.load1_per_core >= 2 else 'ok' }}">{{ snap.resources.load1_per_core }}</b></div>
+</div>
+<span class="glbl">Контейнеры</span>
+<div class="grid">
 {% for name, c in snap.containers.items() %}{% if name in watch %}
 <div class="card"><h4>🐳 {{ name }}</h4>
 <span class="{{ 'ok' if c.running else 'bad' }}">{{ '● работает' if c.running else '■ остановлен' }}</span><br>
 <small>{{ c.status }}</small></div>
 {% endif %}{% endfor %}
+</div>
+<span class="glbl">Сайты</span>
+<div class="grid">
 {% for url, r in snap.http.items() %}
 <div class="card"><h4>🌐 {{ url.replace('https://','').replace('http://','')[:34] }}</h4>
 <span class="{{ 'ok' if r.ok else 'bad' }}">{{ r.code or 'нет ответа' }}</span>
@@ -145,8 +183,11 @@ small{color:#94a3b8}h4{margin:.2rem 0 .6rem}</style></head><body>
 <div><b style="font-size:.85rem;color:#4ade80">Страны</b><table id="vs-geo"></table></div>
 <div><b style="font-size:.85rem;color:#c084fc">Откуда пришли</b><table id="vs-ref"></table></div>
 </div>
-<h4 style="margin-top:12px">Последние посетители (48 ч)</h4>
+<h4 style="margin-top:12px">Гости (48 ч)</h4>
 <div style="overflow-x:auto"><table id="vs-vis"></table></div>
+<h4 style="margin-top:12px">🏠 Мои устройства (48 ч)
+<small style="font-weight:400">— IP, с которых заходили в Argus (VPN копятся сами); в статистику гостей не входят</small></h4>
+<div style="overflow-x:auto"><table id="vs-own"></table></div>
 <small id="vs-note">Источник — access-логи nginx: в код и БД сайтов ничего
 не добавляется, новые сайты подхватываются автоматически по nginx-конфигу.
 Свои проверки Argus и /monitor/ исключены; боты считаются отдельно.
@@ -379,8 +420,9 @@ function loadVisits(days) {
   fetch('visits.json?days=' + days).then(function (r) { return r.json(); })
     .then(function (d) {
       document.getElementById('vs-sum').innerHTML =
-        'За период: посетителей <b>' + d.visitors + '</b> · просмотров <b>' +
-        d.views + '</b> · <small>хитов ботов: ' + d.bots + '</small>';
+        'За период: гостей <b>' + d.visitors + '</b> · их просмотров <b>' +
+        d.views + '</b> · <small>🏠 моих устройств: ' + d.own.devices +
+        ' (' + d.own.views + ' просм.) · хитов ботов: ' + d.bots + '</small>';
       var series = d.sites.map(function (s, i) {
         return {n: s, c: VS_COLORS[i % VS_COLORS.length],
                 d: d.days.map(function (day) {
@@ -396,20 +438,27 @@ function loadVisits(days) {
         : [['(прямые заходы)', '']]);
     });
 }
+function visRows(list) {
+  var rows = [['когда', 'IP', 'страна', 'браузер', 'что смотрел', 'хиты']];
+  list.forEach(function (v) {
+    rows.push([v.last, v.ip, flag(v.country), v.browser,
+               v.pages.map(function (p) {
+                 return p[0] + (p[1] > 1 ? '×' + p[1] : '');
+               }).join('  '), v.hits]);
+  });
+  return rows;
+}
 function loadVisitors() {
   fetch('visitors.json').then(function (r) { return r.json(); })
     .then(function (d) {
-      var rows = [['когда', 'IP', 'страна', 'браузер', 'что смотрел', 'хиты']];
-      d.visitors.forEach(function (v) {
-        rows.push([v.last, v.ip, flag(v.country), v.browser,
-                   v.pages.map(function (p) {
-                     return p[0] + (p[1] > 1 ? '×' + p[1] : '');
-                   }).join('  '), v.hits]);
-      });
-      vsTable('vs-vis', rows);
+      vsTable('vs-vis', d.visitors.length ? visRows(d.visitors)
+                                          : [['(гостей не было)']]);
+      vsTable('vs-own', d.own.length ? visRows(d.own) : [['(заходов не было)']]);
       document.getElementById('vs-note').textContent =
-        'Людей за 48 ч: ' + d.humans + ', хитов ботов: ' + d.bots_hits +
-        '. Источник — access-логи nginx: в код и БД сайтов ничего не ' +
+        'Гостей за 48 ч: ' + d.humans + '; ботов: ' + d.bots_ips +
+        ' IP (' + d.bots_hits + ' хитов) — по User-Agent, сканерным путям и ' +
+        'поведению (сплошные 404, страницы без стилей/картинок). ' +
+        'Источник — access-логи nginx: в код и БД сайтов ничего не ' +
         'добавляется, новые сайты подхватываются сами. IP-гео офлайн (DB-IP).';
     });
 }
@@ -417,6 +466,20 @@ document.querySelectorAll('.vrng').forEach(function (a) {
   a.onclick = function (e) { e.preventDefault(); loadVisits(a.dataset.d); };
 });
 loadVisits(14); loadVisitors();
+
+/* ---- автообновление без прыжка наверх: восстанавливаем скролл ---- */
+try {
+  var sy = sessionStorage.getItem('argusScroll');
+  if (sy !== null) {
+    window.scrollTo(0, parseInt(sy, 10));
+    setTimeout(function () { window.scrollTo(0, parseInt(sy, 10)); }, 400);
+  }
+} catch (e) {}
+setInterval(function () {
+  try { sessionStorage.setItem('argusScroll', String(window.scrollY)); }
+  catch (e) {}
+}, 1000);
+setTimeout(function () { location.reload(); }, 60000);
 </script>
 
 <div class="card" style="margin-top:14px"><h4>💬 Спросить у ИИ о сервере</h4>
