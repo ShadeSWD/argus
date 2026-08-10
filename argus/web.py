@@ -14,7 +14,7 @@ import time
 from flask import (Flask, jsonify, make_response, redirect, render_template_string,
                    request)
 
-from . import atop
+from . import atop, weblog
 
 app = Flask(__name__)
 CONFIG_PATH = os.environ.get('ARGUS_CONFIG', '/root/argus/local/config.json')
@@ -131,6 +131,26 @@ small{color:#94a3b8}h4{margin:.2rem 0 .6rem}</style></head><body>
 <canvas id="g-http" height="80"></canvas>
 <small>Ресурсы — из журналов atop (снимок каждые 10 минут, хранятся 28 дней);
 отклик сайтов — циклы агента (5 минут), только успешные проверки.</small>
+</div>
+<div class="card" style="margin-top:14px">
+<h4>Посещения сайтов
+<span style="float:right;font-size:.85rem">
+<a href="#" class="vrng" data-d="7" style="color:#38bdf8">7 дн</a> ·
+<a href="#" class="vrng" data-d="14" style="color:#38bdf8">14 дн</a> ·
+<a href="#" class="vrng" data-d="30" style="color:#38bdf8">30 дн</a></span></h4>
+<div id="vs-sum" style="margin-bottom:6px"></div>
+<canvas id="vs-chart" height="90"></canvas>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin-top:8px">
+<div><b style="font-size:.85rem;color:#38bdf8">Страницы</b><table id="vs-pages"></table></div>
+<div><b style="font-size:.85rem;color:#4ade80">Страны</b><table id="vs-geo"></table></div>
+<div><b style="font-size:.85rem;color:#c084fc">Откуда пришли</b><table id="vs-ref"></table></div>
+</div>
+<h4 style="margin-top:12px">Последние посетители (48 ч)</h4>
+<div style="overflow-x:auto"><table id="vs-vis"></table></div>
+<small id="vs-note">Источник — access-логи nginx: в код и БД сайтов ничего
+не добавляется, новые сайты подхватываются автоматически по nginx-конфигу.
+Свои проверки Argus и /monitor/ исключены; боты считаются отдельно.
+IP-геолокация офлайн по базе DB-IP (наружу ничего не уходит).</small>
 </div>
 <script>
 function drawSeries(id, label, seriesList, ymax) {
@@ -331,6 +351,72 @@ function ptTick() {
   }).catch(function () {});
 }
 ptTick(); setInterval(ptTick, 3000);
+
+/* ---- посещения сайтов (access-логи nginx) ---- */
+var VS_COLORS = ['#38bdf8', '#4ade80', '#fbbf24', '#c084fc', '#f87171',
+                 '#2dd4bf', '#f472b6', '#94a3b8'];
+function flag(cc) {
+  if (!/^[A-Z]{2}$/.test(cc)) return cc;
+  return cc.replace(/./g, function (c) {
+    return String.fromCodePoint(127397 + c.charCodeAt(0));
+  }) + ' ' + cc;
+}
+function vsTable(id, rows) {
+  var tb = document.getElementById(id);
+  tb.innerHTML = '';
+  rows.forEach(function (r) {
+    var tr = document.createElement('tr');
+    r.forEach(function (v, i) {
+      var td = document.createElement('td');
+      td.textContent = v;
+      if (i === r.length - 1) { td.style.textAlign = 'right'; }
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+}
+function loadVisits(days) {
+  fetch('visits.json?days=' + days).then(function (r) { return r.json(); })
+    .then(function (d) {
+      document.getElementById('vs-sum').innerHTML =
+        'За период: посетителей <b>' + d.visitors + '</b> · просмотров <b>' +
+        d.views + '</b> · <small>хитов ботов: ' + d.bots + '</small>';
+      var series = d.sites.map(function (s, i) {
+        return {n: s, c: VS_COLORS[i % VS_COLORS.length],
+                d: d.days.map(function (day) {
+                  var ts = new Date(day.date + 'T12:00:00').getTime() / 1000;
+                  return [ts, (day.sites[s] || {}).visitors || 0];
+                })};
+      });
+      drawSeries('vs-chart', 'Посетители/день', series);
+      vsTable('vs-pages', d.pages.map(function (p) { return [p[0], p[1]]; }));
+      vsTable('vs-geo', d.countries.map(function (c) { return [flag(c[0]), c[1]]; }));
+      vsTable('vs-ref', d.referers.length
+        ? d.referers.map(function (r) { return [r[0], r[1]]; })
+        : [['(прямые заходы)', '']]);
+    });
+}
+function loadVisitors() {
+  fetch('visitors.json').then(function (r) { return r.json(); })
+    .then(function (d) {
+      var rows = [['когда', 'IP', 'страна', 'браузер', 'что смотрел', 'хиты']];
+      d.visitors.forEach(function (v) {
+        rows.push([v.last, v.ip, flag(v.country), v.browser,
+                   v.pages.map(function (p) {
+                     return p[0] + (p[1] > 1 ? '×' + p[1] : '');
+                   }).join('  '), v.hits]);
+      });
+      vsTable('vs-vis', rows);
+      document.getElementById('vs-note').textContent =
+        'Людей за 48 ч: ' + d.humans + ', хитов ботов: ' + d.bots_hits +
+        '. Источник — access-логи nginx: в код и БД сайтов ничего не ' +
+        'добавляется, новые сайты подхватываются сами. IP-гео офлайн (DB-IP).';
+    });
+}
+document.querySelectorAll('.vrng').forEach(function (a) {
+  a.onclick = function (e) { e.preventDefault(); loadVisits(a.dataset.d); };
+});
+loadVisits(14); loadVisitors();
 </script>
 
 <div class="card" style="margin-top:14px"><h4>💬 Спросить у ИИ о сервере</h4>
@@ -567,6 +653,24 @@ def proc_json():
     if not _auth_ok(request):
         return jsonify({'error': 'auth'}), 401
     return jsonify(atop.process_top())
+
+
+@app.route('/visits.json')
+def visits_json():
+    if not _auth_ok(request):
+        return jsonify({'error': 'auth'}), 401
+    try:
+        days = int(request.args.get('days', 14))
+    except ValueError:
+        days = 14
+    return jsonify(weblog.summary(min(365, max(1, days))))
+
+
+@app.route('/visitors.json')
+def visitors_json():
+    if not _auth_ok(request):
+        return jsonify({'error': 'auth'}), 401
+    return jsonify(weblog.recent_visitors(48))
 
 
 @app.route('/health')
