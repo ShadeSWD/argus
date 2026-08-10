@@ -52,6 +52,13 @@ def detect(snapshot, config):
                           'title': f'Загрузка {res["load1_per_core"]} на ядро',
                           'evidence': res})
 
+    for host, days in snapshot.get('certs', {}).items():
+        if days is not None and days <= config.get('cert_days_min', 14):
+            incidents.append({'key': f'cert-expiring:{host}',
+                              'severity': 'warning',
+                              'title': f'Сертификат {host} истекает через {days} дн.',
+                              'evidence': {'days_left': days}})
+
     for name, log in snapshot.get('logs', {}).items():
         errors = [ln for ln in log.splitlines()
                   if any(m in ln for m in ERROR_MARKERS)]

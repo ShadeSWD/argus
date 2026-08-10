@@ -56,6 +56,24 @@ def run_once(config_path):
     with open(os.path.join(data_dir, 'last_snapshot.json'), 'w',
               encoding='utf-8') as fh:
         json.dump(snapshot, fh, ensure_ascii=False)
+
+    # история метрик для графиков дашборда (точка на каждый цикл)
+    metrics_path = os.path.join(data_dir, 'metrics.jsonl')
+    append_jsonl(metrics_path, {
+        'ts': int(time.time()),
+        **snapshot['resources'],
+        'http_ms': {u: r['ms'] for u, r in snapshot['http'].items() if r['ok']},
+        'containers_up': sum(1 for c in snapshot['containers'].values()
+                             if c['running']),
+    })
+    try:  # ограничиваем историю (~35 дней при цикле в 5 минут)
+        with open(metrics_path, encoding='utf-8') as fh:
+            lines = fh.readlines()
+        if len(lines) > 10000:
+            with open(metrics_path, 'w', encoding='utf-8') as fh:
+                fh.writelines(lines[-10000:])
+    except OSError:
+        pass
     incidents = detector.detect(snapshot, config)
     current_keys = {i['key'] for i in incidents}
 

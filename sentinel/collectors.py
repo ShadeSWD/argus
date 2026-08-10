@@ -4,8 +4,11 @@
 Каждый сборщик возвращает обычные dict/list — детектор работает только
 с этими фактами и никогда не ходит в систему сам (тестируемость).
 """
+import datetime
 import json
 import shutil
+import socket
+import ssl
 import subprocess
 import time
 import urllib.request
@@ -91,7 +94,27 @@ def collect(config):
         'resources': host_resources(),
         'logs': {},
     }
+    snapshot['certs'] = cert_days_left(config.get('http_checks', []))
     for name in config.get('watch_containers', []):
         snapshot['logs'][name] = container_log_tail(
             name, since=config.get('log_since', '10m'))
     return snapshot
+
+
+def cert_days_left(urls, timeout=10):
+    """Дней до истечения TLS-сертификата по каждому https-хосту."""
+    out = {}
+    for url in urls:
+        if not url.startswith('https://'):
+            continue
+        host = url.split('/')[2].split(':')[0]
+        try:
+            ctx = ssl.create_default_context()
+            with socket.create_connection((host, 443), timeout=timeout) as sock:
+                with ctx.wrap_socket(sock, server_hostname=host) as tls:
+                    exp = tls.getpeercert()['notAfter']
+            dt = datetime.datetime.strptime(exp, '%b %d %H:%M:%S %Y %Z')
+            out[host] = (dt - datetime.datetime.utcnow()).days
+        except Exception:
+            out[host] = None
+    return out
