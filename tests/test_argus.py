@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 
-from sentinel import detector, llm, remediation
+from argus import detector, llm, remediation
 
 SNAP = {
     'ts': '2026-08-07T12:00:00',

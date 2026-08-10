@@ -14,8 +14,10 @@ import time
 from flask import (Flask, jsonify, make_response, redirect, render_template_string,
                    request)
 
+from . import atop
+
 app = Flask(__name__)
-CONFIG_PATH = os.environ.get('SENTINEL_CONFIG', '/root/aiops-sentinel/local/config.json')
+CONFIG_PATH = os.environ.get('ARGUS_CONFIG', '/root/argus/local/config.json')
 
 
 def cfg():
@@ -29,7 +31,8 @@ def _sign(value, secret):
 
 def _auth_ok(req):
     c = cfg()
-    token = req.cookies.get('sentinel_auth', '')
+    token = (req.cookies.get('argus_auth')
+             or req.cookies.get('sentinel_auth', ''))  # старое имя куки
     if '|' not in token:
         return False
     payload, sig = token.rsplit('|', 1)
@@ -44,7 +47,7 @@ def _auth_ok(req):
 
 LOGIN_HTML = """<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Мониторинг — вход</title><style>
+<title>Argus — вход</title><style>
 body{font-family:system-ui;display:flex;justify-content:center;align-items:center;
 height:100vh;margin:0;background:#0f172a;color:#e2e8f0}
 form{background:#1e293b;padding:2rem;border-radius:12px;min-width:300px}
@@ -53,7 +56,7 @@ background:#0f172a;color:#e2e8f0;box-sizing:border-box}
 button{width:100%;padding:.6rem;margin-top:.6rem;border:0;border-radius:8px;
 background:#38bdf8;color:#0f172a;font-weight:600;cursor:pointer}
 .err{color:#f87171}</style></head><body>
-<form method="post"><h3>🛰 Мониторинг сервера</h3>
+<form method="post"><h3>🛰 Argus</h3>
 {% if error %}<p class="err">{{ error }}</p>{% endif %}
 <input name="email" type="email" placeholder="email" required>
 <input name="password" type="password" placeholder="пароль" required>
@@ -62,7 +65,7 @@ background:#38bdf8;color:#0f172a;font-weight:600;cursor:pointer}
 DASH_HTML = """<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="60">
-<title>Мониторинг сервера</title><style>
+<title>Argus — мониторинг сервера</title><style>
 body{font-family:system-ui;margin:0;background:#0f172a;color:#e2e8f0}
 header{padding:1rem 1.5rem;background:#1e293b;display:flex;justify-content:space-between}
 main{padding:1rem 1.5rem;max-width:1100px;margin:0 auto}
@@ -72,7 +75,7 @@ main{padding:1rem 1.5rem;max-width:1100px;margin:0 auto}
 table{width:100%;border-collapse:collapse;font-size:.9rem}
 td,th{padding:.35rem .5rem;border-bottom:1px solid #334155;text-align:left}
 small{color:#94a3b8}h4{margin:.2rem 0 .6rem}</style></head><body>
-<header><b>🛰 Мониторинг сервера</b>
+<header><b>🛰 Argus · мониторинг сервера</b>
 <small>снимок: {{ snap.ts }} · автообновление 60 с ·
 инцидентов открыто: {{ open_count }}</small></header><main>
 <div class="grid">
@@ -95,67 +98,239 @@ small{color:#94a3b8}h4{margin:.2rem 0 .6rem}</style></head><body>
 {% endfor %}
 </div>
 <div class="card" style="margin-top:14px">
-<h4>Графики ресурсов
+<h4>Сейчас <small style="font-weight:400">— живые графики, шаг 2 с
+(счётчики ядра, те же, что читает btop)</small></h4>
+<canvas id="lv-cpu" height="64"></canvas>
+<div id="lv-cores" style="display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 8px;font-size:.72rem;color:#94a3b8"></div>
+<canvas id="lv-mem" height="64"></canvas>
+<canvas id="lv-net" height="64"></canvas>
+<canvas id="lv-dsk" height="64"></canvas>
+<small>Окно ~5 минут, переживает автообновление страницы. btop истории не
+хранит, поэтому живой ряд копится прямо в браузере.</small>
+</div>
+<div class="card" style="margin-top:14px">
+<h4>Процессы <small style="font-weight:400">— кто сколько ест, обновление 3 с</small></h4>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px">
+<div><b style="font-size:.85rem;color:#38bdf8">CPU</b><table id="pt-cpu"></table></div>
+<div><b style="font-size:.85rem;color:#4ade80">Память</b><table id="pt-mem"></table></div>
+<div><b style="font-size:.85rem;color:#fbbf24">Диск</b><table id="pt-io"></table></div>
+</div>
+<small id="pt-note"></small>
+</div>
+<div class="card" style="margin-top:14px">
+<h4>История (atop)
 <span style="float:right;font-size:.85rem">
+<a href="#" class="rng" data-h="6" style="color:#38bdf8">6 ч</a> ·
 <a href="#" class="rng" data-h="24" style="color:#38bdf8">24 ч</a> ·
 <a href="#" class="rng" data-h="168" style="color:#38bdf8">7 дн</a> ·
-<a href="#" class="rng" data-h="720" style="color:#38bdf8">30 дн</a></span></h4>
-<canvas id="g-load" height="80"></canvas>
-<canvas id="g-mem" height="80"></canvas>
-<canvas id="g-disk" height="80"></canvas>
+<a href="#" class="rng" data-h="672" style="color:#38bdf8">28 дн</a></span></h4>
+<canvas id="at-cpu" height="80"></canvas>
+<canvas id="at-mem" height="80"></canvas>
+<canvas id="at-dsk" height="80"></canvas>
+<canvas id="at-net" height="80"></canvas>
 <canvas id="g-http" height="80"></canvas>
-<small>Точка — один цикл агента (5 минут). Отклик — только успешные проверки.</small>
+<small>Ресурсы — из журналов atop (снимок каждые 10 минут, хранятся 28 дней);
+отклик сайтов — циклы агента (5 минут), только успешные проверки.</small>
 </div>
 <script>
-function drawChart(id, label, series, color, ymax) {
+function drawSeries(id, label, seriesList, ymax) {
   var cv = document.getElementById(id), ctx = cv.getContext('2d');
   cv.width = cv.parentElement.clientWidth - 32;
-  var W = cv.width, H = cv.height, pad = 34;
+  var W = cv.width, H = cv.height, pad = 40;
   ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = '#94a3b8'; ctx.font = '11px system-ui';
-  ctx.fillText(label, pad, 12);
-  if (!series.length) { ctx.fillText('нет данных', pad, H/2); return; }
-  var xs = series.map(function (p) { return p[0]; });
-  var ys = series.map(function (p) { return p[1]; });
+  ctx.font = '11px system-ui'; ctx.fillStyle = '#94a3b8';
+  var lx = pad;
+  ctx.fillText(label, lx, 12); lx += ctx.measureText(label).width + 12;
+  var all = [];
+  seriesList.forEach(function (s) { all = all.concat(s.d); });
+  if (!all.length) { ctx.fillText('нет данных', pad, H/2); return; }
+  seriesList.forEach(function (s) {
+    if (!s.n) return;
+    ctx.fillStyle = s.c; ctx.fillText('— ' + s.n, lx, 12);
+    lx += ctx.measureText('— ' + s.n).width + 10;
+  });
+  var xs = all.map(function (p) { return p[0]; });
+  var ys = all.map(function (p) { return p[1]; });
   var x0 = Math.min.apply(0, xs), x1 = Math.max.apply(0, xs);
   var y1 = ymax || Math.max(1, Math.max.apply(0, ys) * 1.15);
   ctx.strokeStyle = '#334155';
   ctx.beginPath(); ctx.moveTo(pad, H-16); ctx.lineTo(W-4, H-16); ctx.stroke();
+  ctx.fillStyle = '#94a3b8';
   ctx.fillText('0', 4, H-16); ctx.fillText(String(Math.round(y1)), 4, 22);
-  ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.beginPath();
-  series.forEach(function (p, i) {
-    var x = pad + (W-pad-8) * (p[0]-x0) / Math.max(1, x1-x0);
-    var y = (H-20) - (H-36) * Math.min(p[1], y1) / y1;
-    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  seriesList.forEach(function (s) {
+    ctx.strokeStyle = s.c; ctx.lineWidth = 1.6; ctx.beginPath();
+    s.d.forEach(function (p, i) {
+      var x = pad + (W-pad-8) * (p[0]-x0) / Math.max(1, x1-x0);
+      var y = (H-20) - (H-36) * Math.min(p[1], y1) / y1;
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.stroke();
   });
-  ctx.stroke();
   var d0 = new Date(x0*1000), d1 = new Date(x1*1000);
+  ctx.fillStyle = '#94a3b8';
   ctx.fillText(d0.toLocaleString('ru', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}), pad, H-3);
   var t1 = d1.toLocaleString('ru', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
   ctx.fillText(t1, W - ctx.measureText(t1).width - 6, H-3);
 }
+function loadAtop(hours) {
+  fetch('atop.json?hours=' + hours).then(function (r) { return r.json(); })
+    .then(function (d) {
+      var p = d.points || [];
+      function col(k) { return p.map(function (q) { return [q.ts, q[k]]; }); }
+      drawSeries('at-cpu', 'CPU, %', [
+        {d: col('cpu_pct'), c: '#38bdf8', n: 'занято'},
+        {d: col('iowait_pct'), c: '#f87171', n: 'iowait'}], 100);
+      drawSeries('at-mem', 'Память занята, %', [
+        {d: col('mem_pct'), c: '#4ade80'}], 100);
+      drawSeries('at-dsk', 'Диск, КБ/с', [
+        {d: col('disk_r_kbps'), c: '#38bdf8', n: 'чтение'},
+        {d: col('disk_w_kbps'), c: '#fbbf24', n: 'запись'}]);
+      drawSeries('at-net', 'Сеть, КБ/с', [
+        {d: col('net_rx_kbps'), c: '#38bdf8', n: 'вход'},
+        {d: col('net_tx_kbps'), c: '#c084fc', n: 'выход'}]);
+    });
+}
 function loadMetrics(hours) {
   fetch('metrics.json?hours=' + hours).then(function (r) { return r.json(); })
     .then(function (d) {
-      var pts = d.points || [];
-      drawChart('g-load', 'Загрузка на ядро (LA1/core)',
-        pts.map(function (p) { return [p.ts, p.load1_per_core]; }), '#38bdf8');
-      drawChart('g-mem', 'Свободная память, %',
-        pts.map(function (p) { return [p.ts, p.mem_available_pct]; }), '#4ade80', 100);
-      drawChart('g-disk', 'Диск занят, %',
-        pts.map(function (p) { return [p.ts, p.disk_used_pct]; }), '#fbbf24', 100);
       var http = [];
-      pts.forEach(function (p) {
+      (d.points || []).forEach(function (p) {
         var vals = Object.values(p.http_ms || {});
         if (vals.length) http.push([p.ts, Math.max.apply(0, vals)]);
       });
-      drawChart('g-http', 'Худший отклик сайтов, мс', http, '#f87171');
+      drawSeries('g-http', 'Худший отклик сайтов, мс', [{d: http, c: '#f87171'}]);
     });
 }
 document.querySelectorAll('.rng').forEach(function (a) {
-  a.onclick = function (e) { e.preventDefault(); loadMetrics(a.dataset.h); };
+  a.onclick = function (e) {
+    e.preventDefault(); loadAtop(a.dataset.h); loadMetrics(a.dataset.h);
+  };
 });
-loadMetrics(24);
+loadAtop(24); loadMetrics(24);
+
+/* ---- живые графики (стиль btop): клиент считает дельты счётчиков ---- */
+var LV_MAX = 150;
+var lv = {cpu: [], mem: [], rx: [], tx: [], dr: [], dw: [], cores: [], last: null};
+try {
+  var saved = JSON.parse(sessionStorage.getItem('lv') || 'null');
+  if (saved) { lv = saved; ['cpu','mem','rx','tx','dr','dw'].forEach(function (k) {
+    if (!Array.isArray(lv[k])) lv[k] = []; }); }
+} catch (e) {}
+function lvPush(a, v) { a.push(Math.max(0, v)); if (a.length > LV_MAX) a.shift(); }
+function lvLast(a) { return a.length ? a[a.length - 1] : 0; }
+function fmtK(v) { return v >= 1024 ? (v/1024).toFixed(1) + ' МБ/с' : Math.round(v) + ' КБ/с'; }
+function drawLive(id, label, seriesList, ymax, cur) {
+  var cv = document.getElementById(id), ctx = cv.getContext('2d');
+  cv.width = cv.parentElement.clientWidth - 32;
+  var W = cv.width, H = cv.height;
+  ctx.clearRect(0, 0, W, H);
+  var y1 = ymax;
+  if (!y1) {
+    y1 = 1;
+    seriesList.forEach(function (s) { s.d.forEach(function (v) { if (v > y1) y1 = v; }); });
+    y1 *= 1.15;
+  }
+  seriesList.forEach(function (s) {
+    if (s.d.length < 2) return;
+    var step = (W - 8) / (LV_MAX - 1);
+    ctx.strokeStyle = s.c; ctx.lineWidth = 1.4; ctx.beginPath();
+    s.d.forEach(function (v, i) {
+      var x = W - 2 - (s.d.length - 1 - i) * step;
+      var y = (H - 4) - (H - 24) * Math.min(v, y1) / y1;
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.stroke();
+    if (s.fill) {
+      ctx.lineTo(W - 2, H - 4);
+      ctx.lineTo(W - 2 - (s.d.length - 1) * step, H - 4);
+      ctx.closePath(); ctx.fillStyle = s.c + '2e'; ctx.fill();
+    }
+  });
+  ctx.font = '11px system-ui'; ctx.fillStyle = '#94a3b8';
+  ctx.fillText(label + ': ', 8, 12);
+  ctx.fillStyle = '#e2e8f0';
+  ctx.fillText(cur, 8 + ctx.measureText(label + ': ').width, 12);
+  if (!ymax) {
+    ctx.fillStyle = '#64748b';
+    var pk = 'пик ' + fmtK(y1 / 1.15);
+    ctx.fillText(pk, W - ctx.measureText(pk).width - 6, 12);
+  }
+}
+function lvRender(d) {
+  drawLive('lv-cpu', 'CPU', [{d: lv.cpu, c: '#38bdf8', fill: 1}], 100,
+    Math.round(lvLast(lv.cpu)) + '%');
+  var gb = d ? ((d.mem_total_kb - d.mem_avail_kb) / 1048576).toFixed(1) : '?';
+  drawLive('lv-mem', 'Память', [{d: lv.mem, c: '#4ade80', fill: 1}], 100,
+    Math.round(lvLast(lv.mem)) + '% (' + gb + ' ГБ)');
+  drawLive('lv-net', 'Сеть', [{d: lv.rx, c: '#38bdf8'}, {d: lv.tx, c: '#c084fc'}], null,
+    '↓ ' + fmtK(lvLast(lv.rx)) + '  ↑ ' + fmtK(lvLast(lv.tx)));
+  drawLive('lv-dsk', 'Диск', [{d: lv.dr, c: '#38bdf8'}, {d: lv.dw, c: '#fbbf24'}], null,
+    'чтение ' + fmtK(lvLast(lv.dr)) + '  запись ' + fmtK(lvLast(lv.dw)));
+  var el = document.getElementById('lv-cores');
+  el.innerHTML = '';
+  (lv.cores || []).forEach(function (p, i) {
+    var s = document.createElement('span');
+    s.textContent = 'C' + i + ' ' + p + '%';
+    s.style.cssText = 'padding:1px 7px;border-radius:6px;background:#0f172a';
+    el.appendChild(s);
+  });
+}
+function lvTick() {
+  fetch('live.json').then(function (r) { return r.json(); }).then(function (d) {
+    var pr = lv.last; lv.last = d;
+    if (pr && d.ts > pr.ts) {
+      var dt = d.ts - pr.ts, busy = 0, tot = 0, cores = [];
+      d.cpus.forEach(function (c, i) {
+        var pc = (pr.cpus || [])[i] || c;
+        var b = c[0] - pc[0], t = c[1] - pc[1];
+        busy += b; tot += t;
+        cores.push(t > 0 ? Math.round(100 * b / t) : 0);
+      });
+      lvPush(lv.cpu, tot > 0 ? 100 * busy / tot : 0);
+      lvPush(lv.rx, (d.net_rx_bytes - pr.net_rx_bytes) / dt / 1024);
+      lvPush(lv.tx, (d.net_tx_bytes - pr.net_tx_bytes) / dt / 1024);
+      lvPush(lv.dr, (d.disk_read_sect - pr.disk_read_sect) * 512 / dt / 1024);
+      lvPush(lv.dw, (d.disk_write_sect - pr.disk_write_sect) * 512 / dt / 1024);
+      lv.cores = cores;
+    }
+    lvPush(lv.mem, d.mem_total_kb
+      ? 100 * (d.mem_total_kb - d.mem_avail_kb) / d.mem_total_kb : 0);
+    try { sessionStorage.setItem('lv', JSON.stringify(lv)); } catch (e) {}
+    lvRender(d);
+  }).catch(function () {});
+}
+lvRender(null); lvTick(); setInterval(lvTick, 2000);
+
+/* ---- топ процессов (диспетчер задач) ---- */
+function ptFill(id, rows, val) {
+  var tb = document.getElementById(id);
+  tb.innerHTML = '';
+  rows.forEach(function (p) {
+    var tr = document.createElement('tr');
+    [p.pid, p.name, val(p)].forEach(function (v, i) {
+      var td = document.createElement('td');
+      td.textContent = v;
+      if (i === 0) td.style.color = '#64748b';
+      if (i === 2) { td.style.textAlign = 'right'; td.style.whiteSpace = 'nowrap'; }
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+}
+function ptTick() {
+  fetch('proc.json').then(function (r) { return r.json(); }).then(function (d) {
+    ptFill('pt-cpu', d.cpu, function (p) { return p.cpu_pct.toFixed(1) + '%'; });
+    ptFill('pt-mem', d.mem, function (p) {
+      return p.rss_mb >= 1024 ? (p.rss_mb/1024).toFixed(1) + ' ГБ'
+                              : Math.round(p.rss_mb) + ' МБ';
+    });
+    ptFill('pt-io', d.io, function (p) { return fmtK(p.io_kbps); });
+    document.getElementById('pt-note').textContent =
+      'Всего процессов: ' + d.total +
+      '. CPU может быть больше 100% (несколько ядер); диск — чтение + запись.';
+  }).catch(function () {});
+}
+ptTick(); setInterval(ptTick, 3000);
 </script>
 
 <div class="card" style="margin-top:14px"><h4>💬 Спросить у ИИ о сервере</h4>
@@ -190,7 +365,7 @@ document.getElementById('oc-form').onsubmit = function (e) {
 
 <div class="card" style="margin-top:14px"><h4>Как это работает</h4>
 <small>
-Агент <b>aiops-sentinel</b> запускается по расписанию каждые 5 минут и делает
+Агент <b>Argus</b> запускается по расписанию каждые 5 минут и делает
 полный цикл:<br>
 1) <b>Снимок</b> — состояние Docker-контейнеров, HTTP-проверки сайтов
 (код и время ответа), хвосты логов, диск/память/загрузка процессора.<br>
@@ -224,7 +399,7 @@ document.getElementById('oc-form').onsubmit = function (e) {
 <td><small>{% if e.action %}{{ e.action.id }} — {{ e.action.reason }}{% endif %}</small></td></tr>
 {% endfor %}</table>
 <small>Диагнозы — локальная модель (Ollama), автодействия — только из белого
-списка с кулдаунами. Агент: aiops-sentinel.</small></div>
+списка с кулдаунами. Агент: Argus.</small></div>
 </main></body></html>"""
 
 
@@ -240,7 +415,7 @@ def dashboard():
             if email == c['web_email'] and pw_hash == c['web_password_sha256']:
                 payload = f'{email}:{time.time() + 365 * 86400}'
                 resp = make_response(redirect(request.url))
-                resp.set_cookie('sentinel_auth',
+                resp.set_cookie('argus_auth',
                                 payload + '|' + _sign(payload, c['web_secret']),
                                 max_age=365 * 86400, httponly=True,
                                 secure=True, samesite='Lax')
@@ -248,7 +423,7 @@ def dashboard():
             error = 'Неверный email или пароль.'
         return render_template_string(LOGIN_HTML, error=error)
 
-    data_dir = c.get('data_dir', '/var/lib/aiops-sentinel')
+    data_dir = c.get('data_dir', '/var/lib/argus')
     try:
         with open(os.path.join(data_dir, 'last_snapshot.json'), encoding='utf-8') as fh:
             snap = json.load(fh)
@@ -303,7 +478,7 @@ def ops_chat():
     if not _auth_ok(request):
         return jsonify({'error': 'auth'}), 401
     c = cfg()
-    data_dir = c.get('data_dir', '/var/lib/aiops-sentinel')
+    data_dir = c.get('data_dir', '/var/lib/argus')
     message = str((request.get_json(silent=True) or {}).get('message', '')).strip()[:1000]
     if not message:
         return jsonify({'error': 'пустой вопрос'}), 400
@@ -355,7 +530,7 @@ def metrics():
     since = time.time() - hours * 3600
     points = []
     try:
-        with open(os.path.join(c.get('data_dir', '/var/lib/aiops-sentinel'),
+        with open(os.path.join(c.get('data_dir', '/var/lib/argus'),
                                'metrics.jsonl'), encoding='utf-8') as fh:
             for line in fh:
                 try:
@@ -367,6 +542,31 @@ def metrics():
     except OSError:
         pass
     return jsonify({'points': points})
+
+
+@app.route('/atop.json')
+def atop_json():
+    if not _auth_ok(request):
+        return jsonify({'error': 'auth'}), 401
+    try:
+        hours = int(request.args.get('hours', 24))
+    except ValueError:
+        hours = 24
+    return jsonify({'points': atop.history(min(24 * 28, max(1, hours)))})
+
+
+@app.route('/live.json')
+def live_json():
+    if not _auth_ok(request):
+        return jsonify({'error': 'auth'}), 401
+    return jsonify(atop.live_sample())
+
+
+@app.route('/proc.json')
+def proc_json():
+    if not _auth_ok(request):
+        return jsonify({'error': 'auth'}), 401
+    return jsonify(atop.process_top())
 
 
 @app.route('/health')

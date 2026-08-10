@@ -15,7 +15,7 @@
   "action_cooldown_s": 1800,
   "action_daily_max": 3,
   "actions": {"restart:web": {"cmd": ["docker", "restart", "web"]}},
-  "data_dir": "/var/lib/aiops-sentinel",
+  "data_dir": "/var/lib/argus",
   "notify_cmd": ["/usr/bin/python3", "/path/to/your/notify.py"],
   "web_email": "you@example.org",
   "web_password_sha256": "<sha256 пароля>",

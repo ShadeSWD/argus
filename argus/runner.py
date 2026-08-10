@@ -46,7 +46,7 @@ def append_jsonl(path, record):
 
 def run_once(config_path):
     config = load_config(config_path)
-    data_dir = config.get('data_dir', '/var/lib/aiops-sentinel')
+    data_dir = config.get('data_dir', '/var/lib/argus')
     os.makedirs(data_dir, exist_ok=True)
     state_path = os.path.join(data_dir, 'state.json')
     incidents_path = os.path.join(data_dir, 'incidents.jsonl')
@@ -80,7 +80,7 @@ def run_once(config_path):
     # восстановившиеся
     for key in [k for k in state['open'] if k not in current_keys]:
         opened = state['open'].pop(key)
-        msg = f'✅ aiops: восстановлено — {opened["title"]}'
+        msg = f'✅ argus: восстановлено — {opened["title"]}'
         notify(config, msg)
         append_jsonl(incidents_path, {'ts': snapshot['ts'], 'event': 'resolved',
                                       'key': key, 'title': opened['title']})
@@ -99,7 +99,7 @@ def run_once(config_path):
                 dry_run=config.get('dry_run', False))
             record['action'] = {'id': verdict['action_id'], **action_result}
         append_jsonl(incidents_path, record)
-        lines = [f'🚨 aiops [{inc["severity"]}]: {inc["title"]}',
+        lines = [f'🚨 argus [{inc["severity"]}]: {inc["title"]}',
                  f'Диагноз: {verdict["diagnosis"]}',
                  f'Причина: {verdict["probable_cause"]}',
                  f'Рекомендация: {verdict["recommended_action"]} '

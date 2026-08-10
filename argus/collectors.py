@@ -47,7 +47,7 @@ def http_checks(urls, timeout=15):
     for url in urls:
         t0 = time.time()
         try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'aiops-sentinel'})
+            req = urllib.request.Request(url, headers={'User-Agent': 'argus'})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 results[url] = {'code': resp.status,
                                 'ms': int((time.time() - t0) * 1000),

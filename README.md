@@ -1,4 +1,4 @@
-# aiops-sentinel
+# Argus
 
 Автономный AIOps-агент для малого VPS: наблюдает за продакшен-сервисами,
 диагностирует инциденты локальной LLM и выполняет безопасную авточинку
@@ -50,9 +50,9 @@ cron ──▶ runner ──▶ collectors ─▶ detector ─▶ llm (Ollama) �
 ```bash
 cp deploy/config.example.json local/config.json   # отредактировать
 python3 -m unittest discover tests                # 10 тестов
-python3 -m sentinel.runner local/config.json      # один цикл
-# cron: */5 * * * * PYTHONPATH=/path /usr/bin/python3 -m sentinel.runner /path/local/config.json
-# дашборд: gunicorn -b 127.0.0.1:8085 sentinel.web:app (за nginx)
+python3 -m argus.runner local/config.json      # один цикл
+# cron: */5 * * * * PYTHONPATH=/path /usr/bin/python3 -m argus.runner /path/local/config.json
+# дашборд: gunicorn -b 127.0.0.1:8085 argus.web:app (за nginx)
 ```
 
 Зависимости ядра — только стандартная библиотека Python; Flask нужен
