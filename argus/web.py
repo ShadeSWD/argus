@@ -14,7 +14,7 @@ import time
 from flask import (Flask, jsonify, make_response, redirect, render_template_string,
                    request)
 
-from . import atop, weblog
+from . import atop, weblog, claude
 
 app = Flask(__name__)
 CONFIG_PATH = os.environ.get('ARGUS_CONFIG', '/root/argus/local/config.json')
@@ -135,6 +135,19 @@ text-transform:uppercase;letter-spacing:.06em}
 {% set host = url.split('/')[2].split(':')[0] %}
 {% if snap.certs and snap.certs.get(host) is not none %}<br><small title="Дней до истечения TLS-сертификата">SSL: <b class="{{ 'ok' if snap.certs[host] > 14 else 'warn' }}">{{ snap.certs[host] }} дн.</b></small>{% endif %}</div>
 {% endfor %}
+</div>
+<span class="glbl">Claude</span>
+<div class="card">
+<h4>Статус Claude Code
+<span id="cl-sub" style="float:right;font-size:.8rem;font-weight:400"></span></h4>
+<div id="cl-auth" style="font-size:.85rem;margin-bottom:8px"></div>
+<div id="cl-tiles" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:10px"></div>
+<canvas id="cl-chart" height="80"></canvas>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:8px">
+<div><b style="font-size:.85rem;color:#c084fc">По моделям (30 дн)</b><table id="cl-models"></table></div>
+<div><b style="font-size:.85rem;color:#38bdf8">Потребление по окнам</b><table id="cl-windows"></table></div>
+</div>
+<small id="cl-note"></small>
 </div>
 <div class="card" style="margin-top:14px">
 <h4>Сейчас <small style="font-weight:400">— живые графики, шаг 2 с
@@ -468,6 +481,70 @@ document.querySelectorAll('.vrng').forEach(function (a) {
 });
 loadVisits(14); loadVisitors();
 
+/* ---- статус Claude Code ---- */
+function fmtTok(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + ' млрд';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + ' млн';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + ' тыс';
+  return String(n);
+}
+function tile(label, big, sub, color) {
+  return '<div style="background:#0f172a;border-radius:9px;padding:8px 10px">' +
+    '<div style="font-size:.72rem;color:#94a3b8">' + label + '</div>' +
+    '<div style="font-size:1.15rem;font-weight:600;color:' + (color || '#e2e8f0') +
+    '">' + big + '</div>' +
+    '<div style="font-size:.7rem;color:#64748b">' + sub + '</div></div>';
+}
+function loadClaude() {
+  fetch('claude.json').then(function (r) { return r.json(); }).then(function (d) {
+    var s = d.subscription || {};
+    document.getElementById('cl-sub').innerHTML = s.type
+      ? '🟢 подписка <b>' + String(s.type).toUpperCase() + '</b>' +
+        (s.tier ? ' <small>(' + s.tier.replace('default_claude_', '') + ')</small>' : '')
+      : '';
+    var rd = s.refresh_days;
+    if (rd != null) {
+      var warn = rd < 7;
+      document.getElementById('cl-auth').innerHTML =
+        (warn ? '⚠️ ' : '🔑 ') + 'Авторизация Claude Code истекает через <b class="' +
+        (warn ? 'warn' : 'ok') + '">' + rd.toFixed(1) + ' дн</b> (' +
+        (s.refresh_date || '') + ')' +
+        (warn ? ' — потребуется повторный вход <code>claude</code>' : '');
+    }
+    var w = d.windows || {};
+    function tokandcost(x) {
+      return x.cost_usd ? '≈ $' + x.cost_usd.toLocaleString('ru') + ' по API' : '';
+    }
+    document.getElementById('cl-tiles').innerHTML =
+      tile('За 5 часов (окно тарифа)', fmtTok(w.last5h.output), 'output · ' + tokandcost(w.last5h), '#38bdf8') +
+      tile('Сегодня', fmtTok(w.today.output), 'output · ' + w.today.msgs + ' сообщ.', '#4ade80') +
+      tile('7 дней', fmtTok(w.last7d.output), 'output · ' + tokandcost(w.last7d), '#fbbf24') +
+      tile('Всего (' + d.days_tracked + ' дн)', fmtTok(w.all.output), 'output · ' + tokandcost(w.all), '#c084fc');
+    drawSeries('cl-chart', 'Output-токены/день (30 дн)',
+      [{d: (d.daily || []).map(function (p) {
+        return [new Date(p.date + 'T12:00:00').getTime() / 1000, p.output]; }),
+        c: '#4ade80'}]);
+    var mrows = Object.keys(d.by_model || {}).sort(function (a, b) {
+      return d.by_model[b].total - d.by_model[a].total; }).map(function (m) {
+      return [m, fmtTok(d.by_model[m].output) + ' out',
+              d.by_model[m].cost_usd ? '$' + d.by_model[m].cost_usd.toLocaleString('ru') : '—'];
+    });
+    vsTable('cl-models', mrows);
+    vsTable('cl-windows', [
+      ['5 часов', fmtTok(w.last5h.total), '$' + w.last5h.cost_usd.toLocaleString('ru')],
+      ['сегодня', fmtTok(w.today.total), '$' + w.today.cost_usd.toLocaleString('ru')],
+      ['7 дней', fmtTok(w.last7d.total), '$' + w.last7d.cost_usd.toLocaleString('ru')],
+      ['30 дней', fmtTok(w.last30d.total), '$' + w.last30d.cost_usd.toLocaleString('ru')],
+    ]);
+    document.getElementById('cl-note').textContent =
+      'Токены из локальных транскриптов Claude Code (наружу не уходят). ' +
+      '«total» включает чтение кэша (дёшево и много); показатель нагрузки — output. ' +
+      '$ — гипотетический эквивалент по ценам API (подписка Max их не тарифицирует). ' +
+      'Живого «остатка лимита» в локальных файлах нет — показано потребление по окнам.';
+  }).catch(function () {});
+}
+loadClaude();
+
 /* ---- автообновление без прыжка наверх: восстанавливаем скролл ---- */
 try {
   var sy = sessionStorage.getItem('argusScroll');
@@ -717,6 +794,13 @@ def proc_json():
     if not _auth_ok(request):
         return jsonify({'error': 'auth'}), 401
     return jsonify(atop.process_top())
+
+
+@app.route('/claude.json')
+def claude_json():
+    if not _auth_ok(request):
+        return jsonify({'error': 'auth'}), 401
+    return jsonify(claude.status())
 
 
 @app.route('/visits.json')
