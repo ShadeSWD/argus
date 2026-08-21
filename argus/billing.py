@@ -123,6 +123,28 @@ def run():
                 state['last_auth_warn'] = tag
                 sent.append('auth(%.1f дн)' % ad)
 
+    # --- недельный лимит на исходе (проактивно, раз за цикл сброса) ---
+    wk_thr = float(cfg.get('alert_weekly_pct', 0) or 0)
+    if wk_thr > 0:
+        try:
+            from . import claude
+            for w in claude.usage_limits().get('windows', []):
+                if w['key'] != 'seven_day':
+                    continue
+                if w['used_pct'] >= wk_thr and \
+                        state.get('last_weekly_alert') != w.get('resets_at'):
+                    rh = w.get('resets_in_h')
+                    when = ('через %.0f ч' % rh if rh and rh < 48
+                            else 'через %.1f дн' % (rh / 24) if rh else '')
+                    _notify('📊 Недельный лимит Claude израсходован на %.0f%% '
+                            '(осталось %.0f%%), сброс %s. Дальше — экономнее, '
+                            'иначе упрёшься до сброса.'
+                            % (w['used_pct'], w['remaining_pct'], when))
+                    state['last_weekly_alert'] = w.get('resets_at')
+                    sent.append('weekly(%.0f%%)' % w['used_pct'])
+        except Exception:
+            pass
+
     _save_state(state)
     return sent
 

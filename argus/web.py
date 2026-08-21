@@ -140,6 +140,7 @@ text-transform:uppercase;letter-spacing:.06em}
 <div class="card">
 <h4>Статус Claude Code
 <span id="cl-sub" style="float:right;font-size:.8rem;font-weight:400"></span></h4>
+<div id="cl-limits" style="margin-bottom:10px"></div>
 <div id="cl-auth" style="font-size:.85rem;margin-bottom:8px"></div>
 <div id="cl-tiles" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:10px"></div>
 <canvas id="cl-chart" height="80"></canvas>
@@ -495,9 +496,37 @@ function tile(label, big, sub, color) {
     '">' + big + '</div>' +
     '<div style="font-size:.7rem;color:#64748b">' + sub + '</div></div>';
 }
+function fmtReset(h) {
+  if (h == null) return '';
+  if (h < 1) return 'сброс через ' + Math.max(1, Math.round(h * 60)) + ' мин';
+  if (h < 24) return 'сброс через ' + h.toFixed(1) + ' ч';
+  return 'сброс через ' + (h / 24).toFixed(1) + ' дн';
+}
+function limitBar(w) {
+  var rem = w.remaining_pct;
+  var col = rem >= 50 ? '#4ade80' : rem >= 20 ? '#fbbf24' : '#f87171';
+  return '<div style="margin:6px 0">' +
+    '<div style="display:flex;justify-content:space-between;font-size:.8rem;margin-bottom:2px">' +
+    '<span>' + w.label + '</span>' +
+    '<span><b style="color:' + col + '">осталось ' + rem + '%</b> ' +
+    '<small style="color:#64748b">· ' + fmtReset(w.resets_in_h) + '</small></span></div>' +
+    '<div style="height:9px;border-radius:5px;background:#0f172a;overflow:hidden">' +
+    '<div style="height:100%;width:' + rem + '%;background:' + col + '"></div></div></div>';
+}
 function loadClaude() {
   fetch('claude.json').then(function (r) { return r.json(); }).then(function (d) {
     var s = d.subscription || {};
+    var lim = d.limits || {};
+    var lbox = document.getElementById('cl-limits');
+    if (lim.error) {
+      lbox.innerHTML = '<div style="font-size:.85rem;color:#fbbf24">⚠️ Живой ' +
+        'остаток лимита недоступен: ' + lim.error + '</div>';
+    } else if ((lim.windows || []).length) {
+      lbox.innerHTML = '<div style="font-size:.72rem;color:#94a3b8;' +
+        'text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px">' +
+        'Остаток лимита сессии</div>' +
+        lim.windows.map(limitBar).join('');
+    }
     document.getElementById('cl-sub').innerHTML = s.type
       ? '🟢 подписка <b>' + String(s.type).toUpperCase() + '</b>' +
         (s.tier ? ' <small>(' + s.tier.replace('default_claude_', '') + ')</small>' : '')

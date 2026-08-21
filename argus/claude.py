@@ -22,6 +22,16 @@ import glob
 import json
 import os
 import time
+import urllib.request
+
+USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
+# человекочитаемые имена окон лимита; порядок = приоритет показа
+WINDOW_LABELS = [
+    ('five_hour', '5 часов'),
+    ('seven_day', 'Неделя'),
+    ('seven_day_opus', 'Неделя · Opus'),
+    ('seven_day_sonnet', 'Неделя · Sonnet'),
+]
 
 PROJECTS = os.path.expanduser('~/.claude/projects')
 CREDS = os.path.expanduser('~/.claude/.credentials.json')
@@ -197,6 +207,81 @@ def _pack(by_model):
     }
 
 
+_limits_memo = {'ts': 0.0, 'data': None}
+
+
+def _access_token():
+    """Свежий access-токен из .credentials.json (свой refresh НЕ делаем —
+    иначе ротация refresh-токена разлогинит Claude Code)."""
+    try:
+        c = json.load(open(CREDS, encoding='utf-8')).get('claudeAiOauth', {})
+        return c.get('accessToken'), c.get('expiresAt')
+    except (OSError, ValueError):
+        return None, None
+
+
+def _iso_unix(s):
+    try:
+        return datetime.datetime.fromisoformat(s).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def usage_limits():
+    """Живой остаток лимита по окнам через oauth/usage (кэш 60 с).
+
+    Возвращает {'windows': [...], 'error': str|None}. Остаток = 1-utilization.
+    Не поднимает исключений: при истёкшем токене/сети отдаёт error."""
+    if _limits_memo['data'] is not None and time.time() - _limits_memo['ts'] < 60:
+        return _limits_memo['data']
+    tok, exp = _access_token()
+    out = {'windows': [], 'error': None, 'ts': time.time()}
+    if not tok:
+        out['error'] = 'нет токена'
+    elif exp and exp / 1000 < time.time():
+        out['error'] = 'токен истёк — обнови вход (`claude` в терминале)'
+    else:
+        try:
+            req = urllib.request.Request(USAGE_URL, headers={
+                'Authorization': 'Bearer ' + tok,
+                'anthropic-version': '2023-06-01',
+                'User-Agent': 'claude-cli', 'Accept': 'application/json'})
+            with urllib.request.urlopen(req, timeout=12) as r:
+                raw = json.load(r)
+            seen = set()
+            for key, label in WINDOW_LABELS:
+                v = raw.get(key)
+                if isinstance(v, dict) and isinstance(v.get('utilization'), (int, float)):
+                    seen.add(key)
+                    out['windows'].append(_pack_limit(key, label, v))
+            # прочие непустые окна (внутренние кодовые имена) — если есть расход
+            for key, v in raw.items():
+                if key in seen or not isinstance(v, dict):
+                    continue
+                u = v.get('utilization')
+                if isinstance(u, (int, float)) and u > 0:
+                    out['windows'].append(_pack_limit(key, key, v))
+        except urllib.error.HTTPError as e:
+            out['error'] = ('токен отклонён (401) — обнови вход'
+                            if e.code == 401 else 'HTTP %d' % e.code)
+        except Exception:
+            out['error'] = 'эндпоинт недоступен'
+    _limits_memo.update(ts=time.time(), data=out)
+    return out
+
+
+def _pack_limit(key, label, v):
+    u = max(0.0, min(1.0, float(v['utilization'])))
+    reset = _iso_unix(v.get('resets_at'))
+    return {
+        'key': key, 'label': label,
+        'used_pct': round(u * 100, 1),
+        'remaining_pct': round((1 - u) * 100, 1),
+        'resets_at': v.get('resets_at'),
+        'resets_in_h': round((reset - time.time()) / 3600, 1) if reset else None,
+    }
+
+
 def _subscription():
     out = {'type': None, 'tier': None, 'access_days': None,
            'refresh_days': None, 'refresh_date': None}
@@ -264,5 +349,5 @@ def _status_uncached():
         daily.append({'date': date, 'total': p['total'], 'output': p['output']})
 
     return {'windows': windows, 'by_model': by_model, 'daily': daily,
-            'subscription': _subscription(),
+            'subscription': _subscription(), 'limits': usage_limits(),
             'days_tracked': len(all_days)}
